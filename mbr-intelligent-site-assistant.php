@@ -3,7 +3,7 @@
  * Plugin Name:       MBR Intelligent Site Assistant
  * Plugin URI:        https://littlewebshack.com
  * Description:       A self-hosted conversational site search for WordPress. No external APIs are used for search, and visitor queries never leave your server.
- * Version:           0.9.21
+ * Version:           0.9.22
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            Robert Palmer
@@ -40,7 +40,7 @@ add_filter( 'plugin_row_meta', function ( $links, $file, $data ) {
 }, 10, 3 );
 
 // Plugin constants.
-define( 'MBR_ISA_VERSION',     '0.9.21' );
+define( 'MBR_ISA_VERSION',     '0.9.22' );
 define( 'MBR_ISA_FILE',        __FILE__ );
 define( 'MBR_ISA_DIR',         plugin_dir_path( __FILE__ ) );
 define( 'MBR_ISA_URL',         plugin_dir_url( __FILE__ ) );

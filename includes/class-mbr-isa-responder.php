@@ -35,8 +35,44 @@ class MBR_ISA_Responder {
      */
     private $settings;
 
-    public function __construct( ?array $settings = null ) {
+    /**
+     * Where a PDF's earlier passages come from, for the highlight-link check.
+     *
+     * Optional: without it PDF links simply carry no highlight, exactly as
+     * before 0.9.22.
+     *
+     * @since 0.9.22
+     * @var MBR_ISA_Indexer|null
+     */
+    private $indexer;
+
+    /**
+     * Folded page text per document, for the highlight uniqueness test.
+     * Keyed by post ID; see pdf_earlier_pages().
+     *
+     * @since 0.9.22
+     * @var array<int,array{through:int,pages:array}>
+     */
+    private $pdf_earlier_memo = [];
+
+    /**
+     * How far apart two query terms may sit and still be highlighted as one
+     * span, in characters of text between them.
+     *
+     * @since 0.9.22
+     */
+    const PDF_HIGHLIGHT_GAP = 40;
+
+    /**
+     * Longest highlighted span, in characters.
+     *
+     * @since 0.9.22
+     */
+    const PDF_HIGHLIGHT_MAX_CHARS = 140;
+
+    public function __construct( ?array $settings = null, ?MBR_ISA_Indexer $indexer = null ) {
         $this->settings = null === $settings ? get_option( 'mbr_isa_settings', [] ) : $settings;
+        $this->indexer  = $indexer;
     }
 
     /**
@@ -52,9 +88,12 @@ class MBR_ISA_Responder {
      * @param string[] $query_tokens Stemmed query tokens.
      * @param string   $post_type    Result post type.
      * @param int      $page_number  Page the chunk begins on (PDFs only).
+     * @param int      $page_top     Estimated offset of the chunk on its page.
+     * @param string   $phrase       Literal phrase for a quoted search, or ''.
+     * @param int      $post_id      The result's post ID (PDF highlights only).
      * @return string Fragment including its leading '#', or ''.
      */
-    private function build_deep_link( $passage, array $query_tokens, $post_type, $page_number, $page_top = 0, $phrase = '' ) {
+    private function build_deep_link( $passage, array $query_tokens, $post_type, $page_number, $page_top = 0, $phrase = '', $post_id = 0 ) {
         if ( 'attachment' === $post_type ) {
             if ( $page_number < 1 ) {
                 return '';
@@ -66,6 +105,56 @@ class MBR_ISA_Responder {
             // that fall before the match to land on the right one.
             $pages_over = $this->pages_before_match( $passage, $query_tokens, $phrase );
             $page       = $page_number + $pages_over;
+
+            /*
+             * Highlight the found words, where the viewer can.
+             *
+             * Chrome's PDF viewer honours a text fragment — the same
+             * `:~:text=` directive HTML results have carried since 0.8 — and
+             * highlights the matching words when the file opens. A viewer
+             * that does not understand it never sees it: browsers strip the
+             * directive from the fragment before the document reads it, so
+             * Firefox, Safari and Acrobat get the page number they always got.
+             *
+             * Three findings from testing Chrome's viewer decide the shape:
+             *
+             *  - The page number is the fallback, not a constraint. When the
+             *    text matches, Chrome goes to the first place in the whole
+             *    document where it appears, whatever page the link names. So
+             *    the directive carries enough surrounding words to be unique
+             *    up to the target page, which build_pdf_text_directive()
+             *    checks against the index before emitting anything.
+             *
+             *  - `zoom` cannot ride alongside it. Chrome scrolls to the
+             *    highlight and then applies the zoom, which leaves the same
+             *    scroll offset pointing somewhere else at the new scale —
+             *    page 21 instead of page 24 in testing, with the highlight
+             *    off-screen. So a highlighted link names the page alone.
+             *
+             *  - When the text does not match — a PDF whose text layer the
+             *    extractor could not read faithfully, say — Chrome falls back
+             *    to the page number. The worst case is the top of the right
+             *    page, which is where every PDF link went before 0.9.2.
+             *
+             * The `&` before the directive is for old PDF.js builds that read
+             * the whole fragment as `&`-separated parameters: it keeps the
+             * directive out of the page value, so the page still parses.
+             *
+             * @since 0.9.22
+             */
+            if ( $this->pdf_highlight_enabled() ) {
+                $directive = $this->build_pdf_text_directive(
+                    (string) $passage,
+                    $query_tokens,
+                    (string) $phrase,
+                    (int) $post_id,
+                    (int) $page
+                );
+
+                if ( '' !== $directive ) {
+                    return '#page=' . (int) $page . '&:~:text=' . $directive;
+                }
+            }
 
             /*
              * A vertical offset only applies to the page the chunk starts on.
@@ -287,6 +376,47 @@ class MBR_ISA_Responder {
      * @return int|null Character offset of the match.
      */
     private function locate_phrase( $passage, $phrase ) {
+        $span = $this->locate_phrase_span( $passage, $phrase );
+
+        return null === $span ? null : $span[0];
+    }
+
+    /**
+     * Where a literal phrase starts and ends within a passage, or null.
+     *
+     * locate_phrase() with the far end as well, which a highlight needs and
+     * a snippet does not. Offsets are in characters of the passage as given:
+     * the folding below swaps each curly quote or no-break space for exactly
+     * one character, so a count taken on the folded text holds for the
+     * original too.
+     *
+     * @since 0.9.22
+     *
+     * @param string $passage Passage text.
+     * @param string $phrase  Literal phrase, unquoted.
+     * @return array{0:int,1:int}|null Start and end character offsets.
+     */
+    private function locate_phrase_span( $passage, $phrase ) {
+        $spans = $this->phrase_spans( $passage, $phrase, false );
+
+        return empty( $spans ) ? null : $spans[0];
+    }
+
+    /**
+     * Every place a literal phrase appears in a text, as character offsets.
+     *
+     * The matching rules of locate_phrase(), which are the index's: case is
+     * ignored, curly quotes and no-break spaces are folded, and any run of
+     * whitespace matches any other.
+     *
+     * @since 0.9.22
+     *
+     * @param string $passage Text to search.
+     * @param string $phrase  Literal phrase, unquoted.
+     * @param bool   $all     Every occurrence, or only the first.
+     * @return array<int,array{0:int,1:int}> Start and end offsets, in order.
+     */
+    private function phrase_spans( $passage, $phrase, $all = true ) {
         $fold = function ( $text ) {
             $text = str_replace(
                 [ "\xe2\x80\x98", "\xe2\x80\x99", "\xe2\x80\x9c", "\xe2\x80\x9d", "\xc2\xa0" ],
@@ -298,7 +428,7 @@ class MBR_ISA_Responder {
 
         $needle = trim( preg_replace( '/\s+/u', ' ', $fold( $phrase ) ) );
         if ( '' === $needle ) {
-            return null;
+            return [];
         }
 
         // Whitespace in the phrase matches any run of whitespace in the
@@ -308,11 +438,23 @@ class MBR_ISA_Responder {
             preg_split( '/ /', $needle, -1, PREG_SPLIT_NO_EMPTY )
         ) ) . '/iu';
 
-        if ( ! preg_match( $pattern, $fold( $passage ), $m, PREG_OFFSET_CAPTURE ) ) {
-            return null;
+        $folded = $fold( $passage );
+
+        if ( ! preg_match_all( $pattern, $folded, $m, PREG_OFFSET_CAPTURE ) ) {
+            return [];
         }
 
-        return mb_strlen( substr( $fold( $passage ), 0, (int) $m[0][1] ) );
+        $spans = [];
+        foreach ( $m[0] as $hit ) {
+            $start   = mb_strlen( substr( $folded, 0, (int) $hit[1] ) );
+            $spans[] = [ $start, $start + mb_strlen( $hit[0] ) ];
+
+            if ( ! $all ) {
+                break;
+            }
+        }
+
+        return $spans;
     }
 
     private function locate_match( $passage, array $query_tokens, $phrase = '' ) {
@@ -504,7 +646,8 @@ class MBR_ISA_Responder {
                         (string) ( $r['post_type'] ?? '' ),
                         (int) ( $extra['page_number'] ?? 0 ),
                         (int) ( $extra['page_top'] ?? 0 ),
-                        (string) $phrase
+                        (string) $phrase,
+                        (int) ( $r['post_id'] ?? 0 )
                     );
 
                     if ( '' !== $fragment ) {
@@ -648,7 +791,8 @@ class MBR_ISA_Responder {
                     $r['post_type'] ?? '',
                     (int) ( $r['page_number'] ?? 0 ),
                     (int) ( $r['page_top'] ?? 0 ),
-                    (string) $phrase
+                    (string) $phrase,
+                    (int) ( $r['post_id'] ?? 0 )
                 );
                 if ( '' !== $fragment ) {
                     $results[ $i ]['url']           = ( $r['url'] ?? '' ) . $fragment;
@@ -965,6 +1109,41 @@ class MBR_ISA_Responder {
             $excerpt = $this->add_sentence_breaks( $excerpt );
         }
 
+        /*
+         * A quoted search marks the phrase, not its words.
+         *
+         * Marking stems works word by word, so the phrase came out in pieces:
+         * its stopwords were never marked, since they are not query tokens,
+         * and every other appearance of its content words lit up as well.
+         * "Why those exclusions matter" showed as two marked words in an
+         * unmarked line, which read as a partial match — when the visitor had
+         * asked for, and got, the exact phrase. It also disagreed with the
+         * PDF link, which highlights the whole phrase.
+         *
+         * Falls through to stem marking when the phrase is not in the window,
+         * which happens when a result matched on its title.
+         *
+         * @since 0.9.22
+         */
+        if ( '' !== trim( (string) $phrase ) ) {
+            $spans = $this->phrase_spans( $excerpt, (string) $phrase );
+
+            if ( ! empty( $spans ) ) {
+                $html   = '';
+                $cursor = 0;
+
+                foreach ( $spans as $span ) {
+                    $html .= $this->snippet_piece( mb_substr( $excerpt, $cursor, $span[0] - $cursor ) )
+                        . '<mark>'
+                        . $this->snippet_piece( mb_substr( $excerpt, $span[0], $span[1] - $span[0] ) )
+                        . '</mark>';
+                    $cursor = $span[1];
+                }
+
+                return $html . $this->snippet_piece( mb_substr( $excerpt, $cursor ) );
+            }
+        }
+
         // Escape first so <mark> and <br> are the only HTML we introduce.
         $escaped = esc_html( $excerpt );
 
@@ -983,6 +1162,22 @@ class MBR_ISA_Responder {
         }, $escaped );
 
         return is_string( $highlighted ) ? $highlighted : $escaped;
+    }
+
+    /**
+     * Escape a run of snippet text, turning its newlines into <br>.
+     *
+     * The same two steps build_snippet() applies to a whole snippet, for a
+     * snippet assembled in pieces around phrase marks. Escaping comes first,
+     * so the tag cannot come from the source text.
+     *
+     * @since 0.9.22
+     *
+     * @param string $text Plain text.
+     * @return string HTML.
+     */
+    private function snippet_piece( $text ) {
+        return str_replace( [ "\r\n", "\n" ], '<br>', esc_html( (string) $text ) );
     }
 
     /**
@@ -1095,6 +1290,620 @@ class MBR_ISA_Responder {
         // Well outside this and a viewer is as likely to ignore the whole
         // fragment as to honour it, losing the page jump along with the zoom.
         return max( 25, min( 400, $zoom ) );
+    }
+
+
+    /**
+     * Should PDF links highlight the found words?
+     *
+     * On by default. Separate from pdf_link_position because the trade-off
+     * is separate: a highlighted link names the page alone, so where the text
+     * cannot be matched in the viewer the reader lands at the top of the
+     * right page rather than at the estimated position on it.
+     *
+     * @since 0.9.22
+     *
+     * @return bool
+     */
+    private function pdf_highlight_enabled() {
+        return ! isset( $this->settings['pdf_link_highlight'] )
+            || ! empty( $this->settings['pdf_link_highlight'] );
+    }
+
+
+    /**
+     * The run of passage text to highlight, as character offsets.
+     *
+     * For a quoted search it is the phrase. Otherwise it opens on the
+     * occurrence locate_match() chose — the same one the snippet opens on
+     * and the page number was counted from — and stretches over any further
+     * query terms that follow closely, so "rate limiting" lights up as one
+     * phrase rather than as its first word. Only a term not already covered
+     * extends it: repeats of the same word a sentence later would turn a
+     * highlight into a paragraph.
+     *
+     * Never crosses a page boundary or the end of a sentence. Chrome confines
+     * a highlight to a single page, so text either side of a boundary could
+     * never match; and the gap between sentences is where a PDF keeps what
+     * the extractor is most likely to have lost — a bullet, a heading
+     * number, a dash — so a span reaching across one often cannot match.
+     *
+     * @since 0.9.22
+     *
+     * @param string   $passage      Passage text, with page markers.
+     * @param string[] $query_tokens Stemmed query tokens.
+     * @param string   $phrase       Literal phrase for a quoted search, or ''.
+     * @return array{0:int,1:int}|null Start and end character offsets.
+     */
+    private function pdf_match_span( $passage, array $query_tokens, $phrase ) {
+        $marker = MBR_ISA_PDF_Extractor::PAGE_MARKER;
+
+        $phrase = trim( (string) $phrase );
+        if ( '' !== $phrase ) {
+            $span = $this->locate_phrase_span( $passage, $phrase );
+            if ( null !== $span ) {
+                return $span;
+            }
+        }
+
+        $start = $this->locate_match( $passage, $query_tokens, $phrase );
+        if ( null === $start ) {
+            return null;
+        }
+
+        // Every occurrence, as locate_match() sees them.
+        $patterns = [];
+        foreach ( $query_tokens as $stem ) {
+            $stem = trim( (string) $stem );
+            if ( '' === $stem || strlen( $stem ) < 2 ) {
+                continue;
+            }
+            $patterns[] = preg_quote( $stem, '/' );
+        }
+        if ( empty( $patterns ) ) {
+            return null;
+        }
+
+        $regex = '/\b(' . implode( '|', $patterns ) . ')[\p{L}\p{N}]*/iu';
+        if ( ! preg_match_all( $regex, $passage, $all, PREG_OFFSET_CAPTURE ) ) {
+            return null;
+        }
+
+        $end     = null;
+        $covered = [];
+
+        foreach ( $all[0] as $i => $match ) {
+            $pos  = mb_strlen( substr( $passage, 0, (int) $match[1] ) );
+            $len  = mb_strlen( $match[0] );
+            $term = mb_strtolower( isset( $all[1][ $i ][0] ) ? $all[1][ $i ][0] : $match[0] );
+
+            if ( $pos < $start ) {
+                continue;
+            }
+
+            if ( null === $end ) {
+                // The occurrence locate_match() chose. Anything else here
+                // means the two disagree, and a guess is worse than nothing.
+                if ( $pos !== $start ) {
+                    return null;
+                }
+                $end              = $pos + $len;
+                $covered[ $term ] = true;
+                continue;
+            }
+
+            if ( isset( $covered[ $term ] ) ) {
+                continue;
+            }
+
+            $gap = mb_substr( $passage, $end, $pos - $end );
+
+            if ( ( $pos - $end ) > self::PDF_HIGHLIGHT_GAP
+                || false !== mb_strpos( $gap, $marker )
+                || preg_match( '/[.!?:;]\s/u', $gap )
+                || ( $pos + $len - $start ) > self::PDF_HIGHLIGHT_MAX_CHARS ) {
+                break;
+            }
+
+            $end              = $pos + $len;
+            $covered[ $term ] = true;
+        }
+
+        return null === $end ? null : [ $start, $end ];
+    }
+
+
+    /**
+     * Build the `text=` value that highlights the found words in a PDF.
+     *
+     * The directive names the found words themselves — the same words the
+     * snippet marks — so they are what lights up, not the sentence around
+     * them. On its own a word or two is rarely unique in a long document,
+     * and Chrome highlights the *first* match in the file regardless of the
+     * page the link names: "synonym expansion" aimed at page 33 opens on page
+     * 3, where the phrase first appears. So the words are anchored with the
+     * directive's prefix and suffix context — `before-,found words,-after` —
+     * which Chrome requires to sit immediately either side of the match but
+     * does not highlight.
+     *
+     * Context is added a word at a time until the text no longer appears on
+     * any earlier page, checked against the indexed passages. If nothing
+     * within reach is unique, no directive is emitted and the link falls
+     * back to the page number. A wrong highlight is worse than none: it
+     * overrides the page and sends the reader to the wrong place, where a
+     * missing one merely leaves them at the right page.
+     *
+     * Every word of the directive must match the PDF exactly as Chrome reads
+     * it, and the stored text is not always that. The extractor cannot decode
+     * every font encoding, and what it cannot decode it drops — so "site’s
+     * nonce" is stored as "site s nonce", a bullet between two list items
+     * vanishes, and an em dash leaves only the space beside it. A directive
+     * that reaches across one of those can never match. Testing against the
+     * plugin's own user guide, where those characters are common, settled
+     * four rules that keep the directive clear of them:
+     *
+     *  - Context stays inside the sentence. Bullets, heading numbers and
+     *    section marks live between sentences.
+     *  - Context stops at a lone fragment such as the "s" of a lost
+     *    apostrophe, or at punctuation stranded between spaces where a quote
+     *    mark used to be.
+     *  - Every split of context between the two sides is tried, so one
+     *    damaged side does not sink a directive the other could carry. At
+     *    equal counts a balanced split goes first: on the user guide it
+     *    matched slightly more often than either side alone.
+     *  - A span of three or more words may instead be named by its ends
+     *    (the textStart,textEnd range form), so whatever lies between them —
+     *    including a dropped dash — does not have to match. Both forms are
+     *    offered, and the candidate exposing the fewest word boundaries to
+     *    exact matching wins.
+     *
+     * Two safety margins on top of the uniqueness check:
+     *
+     *  - The text must run to at least three words. The extractor removes
+     *    running headers and footers before indexing, but the PDF still has
+     *    them, so a short phrase that also appears in a header on page 1
+     *    would pass the check and match there.
+     *
+     *  - Matching is folded the way Chrome folds it — case, curly quotes,
+     *    no-break spaces, and any run of whitespace — and tested as a
+     *    substring rather than on word boundaries, so the check errs towards
+     *    adding context, never towards trusting too little.
+     *
+     * @since 0.9.22
+     *
+     * @param string   $passage      Passage text, with page markers.
+     * @param string[] $query_tokens Stemmed query tokens.
+     * @param string   $phrase       Literal phrase for a quoted search, or ''.
+     * @param int      $post_id      Attachment ID.
+     * @param int      $target_page  Page the link opens at.
+     * @return string Encoded directive value (after `text=`), or ''.
+     */
+    private function build_pdf_text_directive( $passage, array $query_tokens, $phrase, $post_id, $target_page ) {
+        if ( null === $this->indexer || $post_id < 1 || $target_page < 1 ) {
+            return '';
+        }
+
+        $marker = MBR_ISA_PDF_Extractor::PAGE_MARKER;
+
+        $span = $this->pdf_match_span( $passage, $query_tokens, $phrase );
+        if ( null === $span ) {
+            return '';
+        }
+        list( $start, $end ) = $span;
+
+        // The page the span sits on, as a stretch of the passage.
+        $seg_start = mb_strrpos( mb_substr( $passage, 0, $start ), $marker );
+        $seg_start = ( false === $seg_start ) ? 0 : $seg_start + 1;
+        $seg_end   = mb_strpos( $passage, $marker, $end );
+        $seg_end   = ( false === $seg_end ) ? mb_strlen( $passage ) : $seg_end;
+
+        $before_text = mb_substr( $passage, $seg_start, $start - $seg_start );
+        $found_text  = mb_substr( $passage, $start, $end - $start );
+        $after_text  = mb_substr( $passage, $end, $seg_end - $end );
+
+        $found = preg_split( '/\s+/u', trim( $found_text ), -1, PREG_SPLIT_NO_EMPTY );
+        if ( empty( $found ) ) {
+            return '';
+        }
+
+        // Words that may serve as context, nearest first, with the text
+        // between each and the match kept exactly as stored. See below.
+        $prefix_pool = $this->pdf_context_words( $before_text, true );
+        $suffix_pool = $this->pdf_context_words( $after_text, false );
+
+        /*
+         * The forms the directive can take. Each is tried with every amount
+         * of context below, and the unique candidate that asks least of the
+         * extracted text wins (see the ordering further down).
+         *
+         * Exact names every found word. That is the most text to be unique
+         * on its own, and the only form that can take context after the
+         * match as well as before it.
+         *
+         * Range names a span of three or more words by its ends — the first
+         * word or two, then the last — so whatever lies between need not
+         * match. That gets a cluster such as "feedback — the signed token"
+         * past a dash the extractor dropped. But its head is short, so it
+         * leans on context before the match, and a heading has none: the
+         * sentence ahead of it ends in a full stop. Offered alone for longer
+         * spans, it left most quoted searches for a heading with no highlight
+         * at all — 28 of 40 in testing — which is why both forms are offered.
+         *
+         * A range's end must be the first of its kind after the start:
+         * Chrome takes the first textEnd it finds, and a range that stops
+         * early is the wrong highlight on the right page.
+         */
+        $forms = [
+            [ 'start' => $found, 'end' => [], 'head' => $found_text ],
+        ];
+
+        if ( count( $found ) >= 3 ) {
+            $end_words = [];
+            $tail      = $this->fold_for_pdf_match( implode( ' ', array_slice( $found, 1 ) ) );
+
+            foreach ( [ 1, 2 ] as $n ) {
+                $candidate = array_slice( $found, -$n );
+                $probe     = $this->fold_for_pdf_match( implode( ' ', $candidate ) );
+
+                if ( '' !== $probe && strpos( $tail, $probe ) === strlen( $tail ) - strlen( $probe ) ) {
+                    $end_words = $candidate;
+                    break;
+                }
+            }
+
+            if ( ! empty( $end_words ) ) {
+                foreach ( [ 1, 2 ] as $n ) {
+                    // Something must be left between the two ends.
+                    if ( count( $found ) - $n - count( $end_words ) < 1 ) {
+                        continue;
+                    }
+                    $start_words = array_slice( $found, 0, $n );
+                    $forms[]     = [
+                        'start' => $start_words,
+                        'end'   => $end_words,
+                        'head'  => implode( ' ', $start_words ),
+                    ];
+                }
+            }
+        }
+
+        $earlier = $this->pdf_earlier_pages( $post_id, $target_page );
+        if ( null === $earlier ) {
+            return '';
+        }
+
+        /*
+         * Every form with every amount of context, ordered by how many word
+         * boundaries must match the PDF exactly — prefix and suffix words,
+         * and the gaps inside whatever the form names in full. Those gaps
+         * are where a dropped dash or quote mark hides, so fewer is safer.
+         * Ties go to fewer context words, then to the form order above, then
+         * to the plan's own order.
+         *
+         * Measured on the user guide against two simpler orders (fewest
+         * context words first, with exact or with range preferred): this one
+         * highlighted 232 of 254 links against 231 for either.
+         */
+        $candidates = [];
+        foreach ( $forms as $f => $form ) {
+            $max_suffix = empty( $form['end'] ) ? count( $suffix_pool ) : 0;
+
+            foreach ( $this->pdf_context_plan( count( $prefix_pool ), $max_suffix ) as $rank => $plan ) {
+                $joins = ( count( $form['start'] ) - 1 )
+                    + ( empty( $form['end'] ) ? 0 : count( $form['end'] ) - 1 )
+                    + $plan[0] + $plan[1];
+
+                $candidates[] = [ $joins, $plan[0] + $plan[1], $f, $rank, $plan[0], $plan[1] ];
+            }
+        }
+        sort( $candidates );
+
+        foreach ( $candidates as $candidate ) {
+            list( , , $f, , $np, $ns ) = $candidate;
+
+            $start_words = $forms[ $f ]['start'];
+            $end_words   = $forms[ $f ]['end'];
+
+            $prefix = array_slice( $prefix_pool, 0, $np );
+            $suffix = array_slice( $suffix_pool, 0, $ns );
+
+            // The needle, as the stored text has it: what Chrome looks for
+            // first, which is the prefix and textStart. In the range form the
+            // rest is matched afterwards, on the same page, so uniqueness
+            // rests on this part alone. Nearest prefix word is first in the
+            // pool, so the outermost is the last one taken.
+            $prefix_text = $np > 0 ? $prefix[ $np - 1 ]['from'] : '';
+            $suffix_text = $ns > 0 ? $suffix[ $ns - 1 ]['from'] : '';
+            $needle      = $prefix_text . $forms[ $f ]['head'] . $suffix_text;
+            $needle_size = $np + count( $start_words ) + $ns;
+
+            if ( $needle_size < 3 || mb_strlen( trim( $needle ) ) < 18 ) {
+                continue;
+            }
+
+            // This page's text ahead of the needle, for the same-page test.
+            $lead = (string) mb_substr( $before_text, 0, mb_strlen( $before_text ) - mb_strlen( $prefix_text ) );
+
+            if ( $this->pdf_text_appears_earlier( $needle, $lead, $earlier ) ) {
+                continue;
+            }
+
+            $directive = '';
+
+            if ( $np > 0 ) {
+                $words = array_reverse( array_column( $prefix, 'word' ) );
+                $directive .= $this->encode_fragment_text( implode( ' ', $words ) ) . '-,';
+            }
+
+            $directive .= $this->encode_fragment_text( implode( ' ', $start_words ) );
+
+            if ( ! empty( $end_words ) ) {
+                $directive .= ',' . $this->encode_fragment_text( implode( ' ', $end_words ) );
+            }
+
+            if ( $ns > 0 ) {
+                $directive .= ',-' . $this->encode_fragment_text( implode( ' ', array_column( $suffix, 'word' ) ) );
+            }
+
+            return $directive;
+        }
+
+        return '';
+    }
+
+
+    /**
+     * The words that may serve as context on one side of a match.
+     *
+     * Nearest first. Each entry carries the word and, under 'from', the
+     * stored text running from that word to the match (or from the match to
+     * it), exactly as written, so the uniqueness test can be run on what the
+     * page actually says rather than on words re-joined with spaces. That
+     * matters: context often touches the match with no space at all —
+     * "expansion." ends on a full stop, "(synonym" opens on a bracket — and
+     * re-joined they become "expansion ." and "( synonym", which appear
+     * nowhere, and a needle that appears nowhere passes every check.
+     *
+     * Collection stops at the first word that cannot be trusted to match the
+     * PDF (see build_pdf_text_directive()):
+     *
+     *  - the end of a sentence: walking back, a word ending in . ! ? : or ;
+     *    is not taken; walking forward, it is taken and is the last;
+     *  - a lone "s", "t", "re", "ll", "ve", "d" or "m" — what is left of a
+     *    contraction or possessive whose apostrophe was dropped;
+     *  - punctuation standing alone between spaces, which is where a quote
+     *    mark or section sign used to be.
+     *
+     * @since 0.9.22
+     *
+     * @param string $text      Text on one side of the match, same page.
+     * @param bool   $backwards True for the text before the match.
+     * @return array<int,array{word:string,from:string}>
+     */
+    private function pdf_context_words( $text, $backwards ) {
+        $text = (string) $text;
+
+        if ( ! preg_match_all( '/\S+/u', $text, $m, PREG_OFFSET_CAPTURE ) ) {
+            return [];
+        }
+
+        $tokens = $m[0];
+        if ( $backwards ) {
+            $tokens = array_reverse( $tokens );
+        }
+
+        $out   = [];
+        $bytes = strlen( $text );
+
+        foreach ( $tokens as $k => $token ) {
+            $word = (string) $token[0];
+            $at   = (int) $token[1];
+
+            // Touching the match, with no space between: "(" before it, or
+            // the full stop after it.
+            $touching = $backwards ? ( $at + strlen( $word ) === $bytes ) : ( 0 === $at );
+
+            // Stranded punctuation: a token of nothing but punctuation that
+            // does not touch the match is standing between spaces, which in
+            // prose it almost never does on its own. A dash is the exception.
+            if ( ! $touching
+                && preg_match( '/^[\p{P}\p{S}]+$/u', $word )
+                && ! preg_match( '/^[\x{2010}-\x{2015}\-]+$/u', $word ) ) {
+                break;
+            }
+
+            // What remains of a contraction or possessive.
+            if ( $at > 0 && ctype_space( $text[ $at - 1 ] )
+                && preg_match( '/^(s|t|d|m|ll|re|ve)\p{P}*$/iu', $word ) ) {
+                break;
+            }
+
+            $ends_sentence = (bool) preg_match( '/[.!?:;][\p{Pe}\p{Pf}"\']*$/u', $word );
+
+            if ( $backwards && $ends_sentence ) {
+                break;
+            }
+
+            $out[] = [
+                'word' => $word,
+                'from' => $backwards ? (string) substr( $text, $at ) : (string) substr( $text, 0, $at + strlen( $word ) ),
+            ];
+
+            if ( ! $backwards && $ends_sentence ) {
+                break;
+            }
+
+            if ( count( $out ) >= 6 ) {
+                break;
+            }
+        }
+
+        return $out;
+    }
+
+
+    /**
+     * The order in which to try amounts of context, as [prefix, suffix].
+     *
+     * Fewest words first, since every word is another chance of meeting
+     * something the extractor read differently; at equal totals, balanced
+     * before lopsided, then prefix before suffix. Capped at eight words.
+     *
+     * @since 0.9.22
+     *
+     * @param int $max_prefix Prefix words available.
+     * @param int $max_suffix Suffix words available.
+     * @return array<int,array{0:int,1:int}>
+     */
+    private function pdf_context_plan( $max_prefix, $max_suffix ) {
+        $plan = [];
+
+        for ( $p = 0; $p <= $max_prefix; $p++ ) {
+            for ( $s = 0; $s <= $max_suffix; $s++ ) {
+                if ( $p + $s <= 8 ) {
+                    $plan[] = [ $p, $s ];
+                }
+            }
+        }
+
+        usort( $plan, function ( $a, $b ) {
+            return [ $a[0] + $a[1], abs( $a[0] - $a[1] ), -$a[0] ]
+                <=> [ $b[0] + $b[1], abs( $b[0] - $b[1] ), -$b[0] ];
+        } );
+
+        return $plan;
+    }
+
+
+    /**
+     * A PDF's text on every page before the target, folded for matching.
+     *
+     * Folded once per document and target page rather than once per
+     * candidate: a directive may try a few dozen amounts of context, and
+     * each is then a plain substring test.
+     *
+     * @since 0.9.22
+     *
+     * @param int $post_id     Attachment ID.
+     * @param int $target_page Page the link opens at.
+     * @return string[]|null Folded page texts, or null when the document's
+     *                       passages could not be read.
+     */
+    private function pdf_earlier_pages( $post_id, $target_page ) {
+        $post_id     = (int) $post_id;
+        $target_page = (int) $target_page;
+
+        /*
+         * Memoised per document, not per target page. A result and its
+         * further mentions aim at several pages of the same file, and folding
+         * is the costly part, so each passage is folded once per request and
+         * the cache only grows when a later page is asked for.
+         */
+        $cached = $this->pdf_earlier_memo[ $post_id ] ?? null;
+
+        if ( null === $cached || $cached['through'] < $target_page ) {
+            $rows = $this->indexer->pdf_passages_through_page( $post_id, $target_page );
+            if ( empty( $rows ) ) {
+                return null;
+            }
+
+            $marker = MBR_ISA_PDF_Extractor::PAGE_MARKER;
+            $pages  = [];
+
+            foreach ( $rows as $row ) {
+                foreach ( explode( $marker, (string) $row['text'] ) as $offset => $text ) {
+                    $page = (int) $row['page'] + $offset;
+                    if ( $page > $target_page ) {
+                        break;
+                    }
+                    $pages[] = [ $page, $this->fold_for_pdf_match( $text ) ];
+                }
+            }
+
+            if ( count( $this->pdf_earlier_memo ) > 20 ) {
+                $this->pdf_earlier_memo = [];
+            }
+
+            $cached = [ 'through' => $target_page, 'pages' => $pages ];
+            $this->pdf_earlier_memo[ $post_id ] = $cached;
+        }
+
+        $out = [];
+        foreach ( $cached['pages'] as $entry ) {
+            if ( $entry[0] < $target_page ) {
+                $out[] = $entry[1];
+            }
+        }
+
+        return $out;
+    }
+
+
+    /**
+     * Would Chrome find this text before the occurrence being linked to?
+     *
+     * Two places it could be: any page before the target, anywhere in the
+     * indexed passages; or earlier on the target page itself, ahead of the
+     * match. The second is tested on this passage only. Text further up the
+     * same page that lives in the previous chunk is not looked for, because
+     * chunks overlap and an occurrence there cannot be told apart from this
+     * one — and it would still put the reader on the right page.
+     *
+     * @since 0.9.22
+     *
+     * @param string   $needle  Text the directive would match, as written.
+     * @param string   $lead    This page's text immediately ahead of it.
+     * @param string[] $earlier From pdf_earlier_pages().
+     * @return bool
+     */
+    private function pdf_text_appears_earlier( $needle, $lead, array $earlier ) {
+        $needle = $this->fold_for_pdf_match( $needle );
+
+        if ( '' === $needle ) {
+            return true;
+        }
+
+        // Earlier on the same page. The needle sits at the end of this
+        // haystack by construction — the two are adjacent slices of the
+        // passage — so finding it anywhere sooner means a second occurrence
+        // ahead of ours.
+        $haystack = $this->fold_for_pdf_match( $lead . $needle );
+        $first    = strpos( $haystack, $needle );
+        if ( false !== $first && $first < strlen( $haystack ) - strlen( $needle ) ) {
+            return true;
+        }
+
+        foreach ( $earlier as $text ) {
+            if ( false !== strpos( $text, $needle ) ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+
+    /**
+     * Fold text the way Chrome's PDF text search compares it.
+     *
+     * Case-insensitive; curly quotes equal straight ones (confirmed in
+     * testing: a directive written with straight quotes highlights curly
+     * ones); a no-break space is a space; and any run of whitespace equals
+     * any other, which is what lets a directive match across a line break.
+     *
+     * @since 0.9.22
+     *
+     * @param string $text Text.
+     * @return string
+     */
+    private function fold_for_pdf_match( $text ) {
+        $text = str_replace(
+            [ "\xe2\x80\x98", "\xe2\x80\x99", "\xe2\x80\x9c", "\xe2\x80\x9d", "\xc2\xa0" ],
+            [ "'", "'", '"', '"', ' ' ],
+            (string) $text
+        );
+
+        return trim( (string) preg_replace( '/\s+/u', ' ', mb_strtolower( $text ) ) );
     }
 
 

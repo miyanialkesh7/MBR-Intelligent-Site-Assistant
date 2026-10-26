@@ -647,6 +647,43 @@
 		this.log.scrollTop = this.log.scrollHeight;
 	};
 
+	/**
+	 * Bring a newly added turn into view.
+	 *
+	 * Scrolling to the bottom is right for a short reply, and wrong for a tall
+	 * one: an answer carrying three results with thumbnails is taller than the
+	 * panel, so landing at the bottom shows the visitor the *last* result and
+	 * hides the first — including the framing message that says how confident
+	 * the assistant is. Where the turn does not fit, its top is the useful
+	 * place to be, and the visitor scrolls down through the results in the
+	 * order they were ranked.
+	 *
+	 * Measured with getBoundingClientRect rather than offsetTop so it does not
+	 * depend on which ancestor happens to be the offset parent. Thumbnails
+	 * carry width and height attributes, so the height read here is the final
+	 * one and no second pass is needed once images load.
+	 *
+	 * @since 0.9.21
+	 * @param {HTMLElement} turn The turn just appended to the log.
+	 */
+	Controller.prototype._scrollToTurn = function ( turn ) {
+		var log = this.log;
+		if ( ! turn || ! log ) {
+			return;
+		}
+
+		var fits = turn.getBoundingClientRect().height <= log.clientHeight;
+		if ( fits ) {
+			this._scrollToBottom();
+			return;
+		}
+
+		// A little headroom, so the turn does not start hard against the edge.
+		var PAD   = 8;
+		var delta = turn.getBoundingClientRect().top - log.getBoundingClientRect().top;
+		log.scrollTop = log.scrollTop + delta - PAD;
+	};
+
 	Controller.prototype._renderUserTurn = function ( text ) {
 		var turn = el( 'div', { className: 'mbr-isa-chat__turn mbr-isa-chat__turn--user' }, [
 			el( 'div', { className: 'mbr-isa-chat__bubble-msg', text: text } )
@@ -715,7 +752,7 @@
 
 		var turn = el( 'div', { className: 'mbr-isa-chat__turn mbr-isa-chat__turn--bot' }, children );
 		this.log.appendChild( turn );
-		this._scrollToBottom();
+		this._scrollToTurn( turn );
 	};
 
 	Controller.prototype._renderErrorTurn = function ( message ) {

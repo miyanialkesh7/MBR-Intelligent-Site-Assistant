@@ -4,7 +4,7 @@ Tags: search, chatbot, ai, site assistant, intelligent search
 Requires at least: 5.8
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 0.9.21
+Stable tag: 0.9.22
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -22,6 +22,7 @@ Key features:
 * Works on virtually every WordPress host -> pure PHP. The only requirement beyond WordPress itself is the mbstring extension, which ships with almost all PHP installs; PDF indexing additionally uses zlib.
 * Intent matching for common questions (contact, pricing, services).
 * Synonym expansion so "WP" finds "WordPress".
+* PDF results open at the right page — and in Chrome, with the found words highlighted.
 * Porter stemming so "building" matches "build".
 * Query log and feedback for tuning.
 * Catppuccin Mocha dark UI.
@@ -34,8 +35,35 @@ Key features:
 
 == Changelog ==
 
+= 0.9.22 =
+PDF results now highlight the words that were found, in Chrome's built-in PDF viewer. A PDF extraction fault that joined words across line breaks is fixed at the same time, so **sites indexing PDFs should run a full reindex**. The schema is unchanged.
+
+* **New: found words are highlighted when a PDF result opens in Chrome.** Chrome's PDF viewer now honours text fragments — the same `#:~:text=` directive HTML results have carried since 0.8 — and scrolls to and highlights the matching words. PDF links had left it out on the long-true assumption that PDF viewers ignore it. A PDF link now looks like `#page=34&:~:text=before-,found words,-after`.
+
+* Testing Chrome's viewer directly showed three things that shape the link. The page number is only a fallback: when the text matches, Chrome goes to its *first* occurrence in the whole file, whatever page the link names. The `zoom` parameter breaks it — Chrome scrolls to the highlight, then applies the zoom, and ends up on a different page. And `#search=` does nothing in Chrome at all.
+
+* So each link names the found words and anchors them with surrounding words, added one at a time until the text appears on no earlier page — checked against the index before anything is emitted. Where nothing nearby is unique, the link keeps its existing page-and-position form. A highlighted link names the page only, without `zoom`.
+
+* The extractor drops characters it cannot decode — curly apostrophes and quotes, dashes, bullets and section signs in subset fonts such as ReportLab's — so a link reaching across one could never match. Context therefore stays within the sentence, stops at tell-tale fragments such as the lone "s" a dropped apostrophe leaves, is tried with every split between the two sides, and a longer span is offered both in full and by its first and last words (so the middle need not match) — whichever exposes the fewest word boundaries wins. Offering only the first-and-last form left quoted searches for headings without a highlight, since a heading has no words before it to anchor on. A miss costs little — Chrome opens at the right page — while a wrong match would send the reader elsewhere, so every rule errs towards no highlight rather than a doubtful one.
+
+* Other viewers are unaffected: browsers strip the directive before the document reads it, so Firefox, Safari and Acrobat get the page number they always got.
+
+* **Changed: a quoted search marks the whole phrase in its snippet**, rather than its separate words. Stopwords inside the phrase were never marked, so "Why those exclusions matter" showed as two marked words and read as a partial match. The snippet now agrees with the PDF highlight. Unquoted searches are unchanged.
+
+* **New setting: Content › PDF highlighting** (on by default). Untick it to keep the estimated on-page position for everyone and drop the highlight. Takes effect immediately.
+
+* **Fixed: PDF lines ending in `T*` were glued to the next line.** The next-line operator matched nothing in the extractor, so the last word of every wrapped line was joined to the first word of the next. ReportLab ends every wrapped line that way — the bundled user guide was indexed with "commonquestions" and "chatwidget" in it, and neither half of either word could be found. Reindexing the guide drops its vocabulary from 2,733 terms to 1,903: 830 of the old terms were glued pairs.
+
+* Fixed: the `'` and `"` text operators broke the line after their string rather than before it, joining that line to the previous one.
+
+* A notice asks sites with PDFs in the index to reindex, and clears when they do. Nothing is exposed while it is pending.
+
+* Translation template regenerated: 334 strings.
+
 = 0.9.21 =
 Ten low-severity findings from an external re-test of 0.9.20. Nothing about indexing, ranking, the visitor path or the schema changes, so **no reindex is required**.
+
+* **Changed: a multi-result answer now opens at its first result.** The widget scrolled to the bottom of the message log after every reply. That is right for a short answer and wrong for a tall one — an answer carrying three results with thumbnails is taller than the panel, so the visitor arrived at the *last* result, with the first one and the framing message above it scrolled off the top. Where a reply does not fit in the panel, the log now opens at the top of that reply, and the visitor reads down through the results in the order they were ranked. Short replies still scroll to the bottom exactly as before.
 
 * **Fixed: feedback recording was not atomic.** The endpoint read the `feedback` column, checked it was still NULL, and then wrote it, with nothing holding the row in between — so two submissions arriving at the same moment could both pass the check, and the second would overwrite the first. That is the "one rating per answer" rule introduced in 0.9.7 failing at precisely the moment it is meant to apply. The window is small and the prize is changing your own rating, so this is an integrity fault rather than a vulnerability, but the fix costs nothing: the write now carries `AND feedback IS NULL` in its WHERE clause, so the database decides which of the two arrived first. The losing request gets a 409, which the widget already treats as success.
 

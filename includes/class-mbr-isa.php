@@ -115,6 +115,10 @@ class MBR_ISA {
             MBR_ISA_Activator::migrate_to_099( $installed );
         }
 
+        if ( version_compare( $installed, '0.9.22', '<' ) ) {
+            MBR_ISA_Activator::migrate_to_0922( $installed );
+        }
+
         update_option( 'mbr_isa_version', MBR_ISA_VERSION );
     }
 
@@ -169,7 +173,7 @@ class MBR_ISA {
     }
 
     /**
-     * One-time notice after upgrading to 0.8.2.
+     * One-time notice after upgrading to 0.8.2, 0.8.3 or 0.9.22.
      *
      * The visibility fixes gate what *enters* the index; they cannot retract
      * what a previous version already put there. Until a reindex runs, a
@@ -184,10 +188,11 @@ class MBR_ISA {
             return;
         }
 
-        $notice_082 = (bool) get_transient( 'mbr_isa_notice_082' );
-        $notice_083 = (bool) get_transient( 'mbr_isa_notice_083' );
+        $notice_082  = (bool) get_transient( 'mbr_isa_notice_082' );
+        $notice_083  = (bool) get_transient( 'mbr_isa_notice_083' );
+        $notice_0922 = (bool) get_transient( 'mbr_isa_notice_0922' );
 
-        if ( ! $notice_082 && ! $notice_083 ) {
+        if ( ! $notice_082 && ! $notice_083 && ! $notice_0922 ) {
             return;
         }
 
@@ -197,6 +202,7 @@ class MBR_ISA {
         if ( ! $needs ) {
             delete_transient( 'mbr_isa_notice_082' );
             delete_transient( 'mbr_isa_notice_083' );
+            delete_transient( 'mbr_isa_notice_0922' );
             return;
         }
 
@@ -218,6 +224,12 @@ class MBR_ISA {
         if ( $notice_082 ) {
             echo '<p>'
                 . esc_html__( 'This version also stops password-protected posts being indexed. Content indexed by an earlier version is still present and still searchable until you rebuild.', 'mbr-isa' )
+                . '</p>';
+        }
+
+        if ( $notice_0922 ) {
+            echo '<p>'
+                . esc_html__( 'Earlier versions joined words across line breaks when reading many PDFs, so a phrase like "common questions" was stored as "commonquestions" wherever a line wrapped, and neither word could be found there. Rebuilding fixes that, and lets PDF results highlight the matching words.', 'mbr-isa' )
                 . '</p>';
         }
 
@@ -456,7 +468,9 @@ class MBR_ISA {
 
     public function responder() {
         if ( null === $this->responder ) {
-            $this->responder = new MBR_ISA_Responder();
+            // The indexer lets PDF links check their highlight text against
+            // the rest of the document. See build_pdf_text_directive().
+            $this->responder = new MBR_ISA_Responder( null, $this->indexer() );
         }
         return $this->responder;
     }
@@ -611,6 +625,9 @@ class MBR_ISA {
         );
 
         $settings['index_pdfs'] = ! empty( $_POST['index_pdfs'] ) ? 1 : 0;
+
+        // Highlight links. Read at query time, so it applies at once.
+        $settings['pdf_link_highlight'] = ! empty( $_POST['pdf_link_highlight'] ) ? 1 : 0;
 
         /*
          * PDF visibility. Anything unrecognised falls back to 'linked' — the
@@ -972,6 +989,7 @@ class MBR_ISA {
             $pdf_enabled         = ! empty( $content_settings['index_pdfs'] );
             $pdf_max_mb          = isset( $content_settings['pdf_max_filesize_mb'] ) ? (int) $content_settings['pdf_max_filesize_mb'] : 20;
             $pdf_visibility      = isset( $content_settings['pdf_visibility'] ) ? (string) $content_settings['pdf_visibility'] : 'linked';
+            $pdf_highlight       = ! isset( $content_settings['pdf_link_highlight'] ) || ! empty( $content_settings['pdf_link_highlight'] );
 
             /*
              * Eligibility counter. A setting that silently matches nothing is
@@ -1146,6 +1164,21 @@ class MBR_ISA {
                                 </label>
                                 <p class="description">
                                     <?php esc_html_e( 'Extracts the text layer from each PDF. Scanned/image-only PDFs with no text layer are skipped automatically. Results link straight to the file.', 'mbr-isa' ); ?>
+                                </p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'PDF highlighting', 'mbr-isa' ); ?></th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" name="pdf_link_highlight" value="1" <?php checked( $pdf_highlight ); ?>>
+                                    <?php esc_html_e( 'Highlight the matching words when a PDF result is opened.', 'mbr-isa' ); ?>
+                                </label>
+                                <p class="description">
+                                    <?php esc_html_e( 'Chrome\'s built-in PDF viewer scrolls to the words and highlights them. Other viewers ignore the highlight and open at the right page, as before. Takes effect immediately; no reindex needed.', 'mbr-isa' ); ?>
+                                </p>
+                                <p class="description">
+                                    <?php esc_html_e( 'Where the words cannot be matched in the file — usually because its text could not be read exactly — Chrome opens at the top of the right page rather than at the estimated position on it. Untick to keep the estimated position for everyone and drop the highlight.', 'mbr-isa' ); ?>
                                 </p>
                             </td>
                         </tr>

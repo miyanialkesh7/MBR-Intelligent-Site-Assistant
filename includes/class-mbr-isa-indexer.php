@@ -137,6 +137,14 @@ class MBR_ISA_Indexer {
     private $visibility_memo = [];
 
     /**
+     * Memoised results of pdf_passages_through_page(), keyed "post:page".
+     *
+     * @since 0.9.22
+     * @var array<string,array>
+     */
+    private $pdf_passage_memo = [];
+
+    /**
      * Object-cache group for cross-request visibility answers.
      *
      * Non-persistent by default, which is fine: the memo above carries the
@@ -1217,6 +1225,73 @@ class MBR_ISA_Indexer {
         return $out;
     }
 
+    /**
+     * A PDF's stored passages, from the start of the document to a page.
+     *
+     * The responder needs this to build a highlight link. Chrome's viewer
+     * highlights the *first* place in the document where the linked text
+     * appears, whatever page the link names, so a link aimed at page 34 is
+     * only safe if its text does not also turn up on pages 1 to 33. That is a
+     * question about the whole of the document before the match, which no
+     * single result row can answer.
+     *
+     * Only rows that begin on or before the page are read: any text on an
+     * earlier page lives in a chunk that begins no later than that page, so
+     * nothing relevant is missed, and a match on page 3 of a 300-page report
+     * costs a handful of rows rather than all of them.
+     *
+     * Memoised for the request, since a document's further mentions all ask
+     * about the same file.
+     *
+     * @since 0.9.22
+     *
+     * @param int $post_id  Attachment ID.
+     * @param int $max_page Last page of interest, 1-based.
+     * @return array<int,array{page:int,text:string}> Rows in document order.
+     */
+    public function pdf_passages_through_page( $post_id, $max_page ) {
+        global $wpdb;
+
+        $post_id  = (int) $post_id;
+        $max_page = (int) $max_page;
+
+        if ( $post_id < 1 || $max_page < 1 ) {
+            return [];
+        }
+
+        $key = $post_id . ':' . $max_page;
+        if ( isset( $this->pdf_passage_memo[ $key ] ) ) {
+            return $this->pdf_passage_memo[ $key ];
+        }
+
+        // Bounded like the visibility memo: one search touches a few files.
+        if ( count( $this->pdf_passage_memo ) > 50 ) {
+            $this->pdf_passage_memo = [];
+        }
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- memoised above; table name is the plugin's own.
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT page_number, excerpt
+             FROM {$wpdb->prefix}mbrisa_documents
+             WHERE post_id = %d AND doc_kind = 'pdf' AND page_number BETWEEN 1 AND %d
+             ORDER BY chunk_index ASC",
+            $post_id,
+            $max_page
+        ) );
+
+        $out = [];
+        foreach ( (array) $rows as $row ) {
+            $out[] = [
+                'page' => (int) $row->page_number,
+                'text' => (string) $row->excerpt,
+            ];
+        }
+
+        $this->pdf_passage_memo[ $key ] = $out;
+
+        return $out;
+    }
+
     public function set_last_full_index_now() {
         $status = get_option( 'mbr_isa_index_status', [] );
         $status['last_full_index'] = current_time( 'mysql' );
@@ -1228,6 +1303,7 @@ class MBR_ISA_Indexer {
         update_option( 'mbr_isa_index_status', $status );
         delete_transient( 'mbr_isa_notice_082' );
         delete_transient( 'mbr_isa_notice_083' );
+        delete_transient( 'mbr_isa_notice_0922' );
     }
 
     // =========================================================================

@@ -6,17 +6,17 @@
 
 No external APIs. No monthly fees. Nothing leaves your server on the visitor path.
 
-[![Version](https://img.shields.io/badge/version-0.9.21-7c3fbf)](https://littlewebshack.com)
+[![Version](https://img.shields.io/badge/version-0.9.22-7c3fbf)](https://littlewebshack.com)
 [![WordPress](https://img.shields.io/badge/WordPress-5.8%2B-21759b)](https://wordpress.org)
 [![PHP](https://img.shields.io/badge/PHP-7.4%2B-777bb4)](https://www.php.net)
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-3fb950)](LICENSE)
 [![Free](https://img.shields.io/badge/price-free%20forever-3fb950)](https://littlewebshack.com)
 
-[Download](https://littlewebshack.com/mbr-intelligent-site-assistant) · [User guide (PDF)](mbr-intelligent-site-assistant-user-guide-v0_9_21.pdf) · [How it works](#how-it-works) · [Configuration](#configuration)
+[Download](https://littlewebshack.com/mbr-intelligent-site-assistant) · [User guide (PDF)](mbr-intelligent-site-assistant-user-guide-v0_9_22.pdf) · [How it works](#how-it-works) · [Configuration](#configuration)
 </div>
 
   <div align="center">
-    <img src="assets/ISA - Promo.png" alt="MBR Intelligent Site Assistant" width="920">
+    <img src="assets/screenshot-widget.jpg" alt="MBR Intelligent Site Assistant" width="720">
   </div>
 
 ---
@@ -51,13 +51,13 @@ hallucination risk, and no outbound request carrying your visitors' questions.
 | **Genuinely self-hosted** | Zero outbound requests on the visitor path. Ranking, PDF extraction and snippet generation are all local. The only network call the plugin ever makes is the optional update check. |
 | **BM25 ranking** | Field-weighted (title 3.0, excerpt 1.5, body 1.0), each field length-normalised against its own average rather than the whole document. |
 | **Passage chunking** | Long documents split into ~250-word overlapping chunks, each scored as its own unit, so a relevant paragraph deep inside a 30-page PDF competes on its own merits. |
-| **PDF indexing** | Pure-PHP text extraction — FlateDecode, ASCII85, ASCIIHex — with no external binaries. Results deep-link to the page *and* the passage. |
+| **PDF indexing** | Pure-PHP text extraction — FlateDecode, ASCII85, ASCIIHex — with no external binaries. Results deep-link to the page *and* the passage, and in Chrome the found words are highlighted when the PDF opens. |
 | **Image indexing** | Optional. Images are indexed on their alt text, caption, description and filename — everything a person wrote about the picture. Nothing is read from the image itself; there is no vision model and no outbound call. Results carry a thumbnail, an `IMAGE` badge, and a lightbox. |
 | **Alt text audit** | Finds images with no alt text and ranks them by how many published pages actually display each one, with inline editing. It does not generate the text — see [On not generating alt text](#on-not-generating-alt-text). |
-| **Exact phrase search** | Quote a query to demand a literal run of words. Bypasses intents and synonyms, which is the point. |
+| **Exact phrase search** | Quote a query to demand a literal run of words. Bypasses intents and synonyms, which is the point. The snippet marks the phrase whole. |
 | **Intent matching** | Pair trigger phrases with hand-written answers for questions your content does not cover. Search results are still offered beneath, where they are good enough. |
 | **Synonyms and stemming** | Porter stemming plus editable synonym groups, so "WP" finds "WordPress" and "building" matches "build". |
-| **Deep links** | Posts and pages link straight to the matching passage using the Text Fragments standard. No JavaScript involved. |
+| **Deep links** | Posts and pages link straight to the matching passage using the Text Fragments standard, and so do PDFs opened in Chrome — checked against the index first, so a highlight never sends the reader to the wrong page. No JavaScript involved. |
 | **Access-control aware** | Only publicly readable content is indexed, and every result is re-tested against the live post before it is returned. Membership plugins can veto a post with one filter. |
 | **Five themes** | Mocha, Slate Light, Ocean, Sunset and Forest, with an optional glassmorphism effect. All five clear WCAG AA contrast in both modes. |
 | **WP-CLI** | `reindex`, `purge` and `status`, free of the web server's time and memory limits. |
@@ -269,7 +269,7 @@ compatible — a manifest with no `checksum` key updates exactly as before.
 ## Documentation
 
 A comprehensive user guide is bundled as a PDF inside the ZIP, at the plugin
-root as `mbr-intelligent-site-assistant-user-guide-v0_9_21.pdf` — installation,
+root as `mbr-intelligent-site-assistant-user-guide-v0_9_22.pdf` — installation,
 first-run setup, the diagnostic dashboard, indexing behaviour, the REST API,
 privacy, troubleshooting, and a full technical reference of every setting,
 filter and table.
@@ -300,6 +300,23 @@ a licence.
 
 Full history is in `readme.txt`, `CHANGELOG.md`, and chapter 2 of the user
 guide. Most recent:
+
+**0.9.22** — PDF results now highlight the words that were found, in Chrome's
+built-in PDF viewer. Chrome honours text fragments in PDFs — the same
+`#:~:text=` directive posts and pages already use — but highlights the *first*
+match anywhere in the file whatever page the link names, and loses the scroll
+if `zoom` rides alongside. So each PDF link names the found words, adds
+context a word at a time until they appear on no earlier page (checked against
+the index), and drops `zoom`; where nothing is safely unique the link keeps
+its 0.9.21 form. In testing against the user guide, 233 of 254 PDF links
+highlighted on the right page and none opened on the wrong one. A quoted
+search now marks its phrase whole in the snippet. New setting: Content › PDF
+highlighting (`pdf_link_highlight`, on by default). **Also fixed:** the PDF
+extractor never recognised the `T*` next-line operator, so the last word of
+every wrapped line was glued to the next — ReportLab ends every wrapped line
+that way, and the user guide was indexed with "commonquestions" in it. **Run
+one full reindex if you index PDFs**; an admin notice prompts for it. No
+schema change.
 
 **0.9.21** — Ten low-severity findings from an external re-test of 0.9.20,
 plus an integrity fix from a second audit; no reindex and no schema change.

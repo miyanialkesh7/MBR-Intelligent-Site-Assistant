@@ -9,11 +9,141 @@ Dates are DD/MM/YYYY.
 
 ## [Unreleased]
 
+## [0.9.22] - 25/10/2026
+
+PDF results now highlight the words that were found, in Chrome's built-in PDF
+viewer. A PDF extraction fault that joined words across line breaks is fixed at
+the same time; **sites indexing PDFs should run a full reindex** to pick it up.
+The schema is unchanged.
+
+### Added
+
+- **Found words are highlighted when a PDF result opens in Chrome.** Chrome's
+  PDF viewer now honours text fragments — the `#:~:text=` directive HTML
+  results have carried since 0.8 — and scrolls to and highlights the matching
+  words. PDF links had deliberately left the directive out, on the long-true
+  assumption that PDF viewers ignore it. A PDF link now reads
+  `#page=34&:~:text=before-,found words,-after`.
+- Testing Chrome's viewer directly turned up three behaviours that shape the
+  link. **The page number is only a fallback**: when the text matches, Chrome
+  goes to its *first* occurrence in the whole file, whatever page the link
+  names — "synonym expansion" aimed at page 33 opened on page 3. **`zoom`
+  breaks it**: Chrome scrolls to the highlight and then applies the zoom, which
+  leaves the same scroll offset pointing somewhere else at the new scale (page
+  21 instead of 24 in testing). **`#search=` does nothing** in Chrome, so the
+  older PDF open parameter is no alternative.
+- So the directive names the found words and anchors them with the
+  directive's prefix and suffix context, adding a word at a time until the
+  text appears on no earlier page. That is checked against the indexed
+  passages before anything is emitted. If nothing within reach is unique, the
+  link keeps its existing page-and-position form. A highlighted link names the
+  page alone, without `zoom`.
+- The extractor drops characters it cannot decode — curly apostrophes and
+  quotes, dashes, bullets and section signs in subset fonts such as
+  ReportLab's — so "site’s nonce" is stored as "site s nonce", and a directive
+  reaching across one can never match. Context therefore stays inside the
+  sentence, stops at a stranded fragment such as that "s", and is tried with
+  every split between the two sides. A span of three or more words is offered
+  both in full and by its ends (`start,end`, so its middle need not match),
+  and the candidate exposing the fewest word boundaries to exact matching
+  wins.
+- Offering the range form alone for longer spans — as an early build of this
+  release did — left quoted searches for a heading without a highlight: a
+  range leans on words before the match, and the sentence before a heading
+  ends in a full stop. 28 of 40 quoted heading searches got none. Offering
+  both forms fixed all but a handful.
+- A missed match costs little: Chrome falls back to the page number. A wrong
+  match would override the page and send the reader elsewhere, so every rule
+  above errs towards no highlight rather than a doubtful one. See the testing
+  note below.
+- Firefox, Safari, Acrobat and other viewers are unaffected. Browsers strip
+  the directive from the fragment before the document reads it, so they get
+  the page number they always got. The `&` before the directive keeps older
+  PDF.js builds, which split the fragment on `&`, reading the page correctly.
+- **New setting: Content tab › PDF highlighting** (`pdf_link_highlight`, on by
+  default). Untick it to keep the estimated on-page position for every visitor
+  and drop the highlight. Read at query time, so it applies immediately.
+- `MBR_ISA_Indexer::pdf_passages_through_page()`, used by the uniqueness
+  check. Reads only rows that begin on or before the target page, memoised per
+  request.
+
+### Fixed
+
+- **PDF lines ending in `T*` were glued to the next line.** The content-stream
+  tokeniser reads `T*` as one token, but the switch expected `T` followed by a
+  separate `*`, so the next-line operator matched nothing and added no break.
+  ReportLab ends every wrapped line that way: the bundled user guide was
+  indexed with "commonquestions", "chatwidget" and "monthlysubscription" in
+  it, and neither half of any such word could be found. Reindexing the guide
+  with the fix takes its vocabulary from 2,733 terms to 1,903 — 830 of the old
+  terms were glued pairs.
+- **The `'` and `"` operators broke the line after their text instead of
+  before it.** Both move to the next line and then show a string, but operands
+  precede operators, so the break was appended after the string had already
+  joined the previous line. The break now goes ahead of the string.
+
+### Changed
+
+- **A quoted search marks the whole phrase in its snippet.** Snippets marked
+  query stems word by word, so a phrase came out in pieces: its stopwords were
+  never marked, and every other appearance of its content words lit up too.
+  "Why those exclusions matter" showed as two marked words in an unmarked
+  line, which read as a partial match when the visitor had asked for, and
+  got, the exact phrase — and it disagreed with the PDF link, which highlights
+  the whole phrase. Unquoted searches are unchanged, and a phrase result that
+  matched on its title still falls back to marking stems.
+- `MBR_ISA_Responder` takes an optional `MBR_ISA_Indexer` as its second
+  constructor argument. Without one, PDF links carry no highlight and behave
+  exactly as in 0.9.21.
+- `languages/mbr-isa.pot` regenerated: 334 strings.
+
+### Upgrading
+
+- Sites with PDFs in the index see a dismiss-by-reindexing notice, as after
+  0.8.2. Nothing is exposed while it is pending; old rows are only worse at
+  being found, and highlight links built from glued words fall back safely to
+  the page number.
+
+### Testing note
+
+- Checked in Chromium 153 against the bundled 68-page user guide: 90 queries
+  — 50 ordinary and quoted searches, plus 40 quoted searches for headings —
+  producing 254 PDF links, each opened in the real viewer and compared, pixel
+  for pixel, against the same scroll position with no directive. 245 links
+  carried a highlight: 233 lit up the found words on the right page, and 12
+  did not match, so Chrome opened the right page without one. The other 9 had
+  no context that was safely unique and kept the 0.9.21 link. **None opened
+  on the wrong page.** Quoted heading searches highlighted 55 of 56. The
+  uniqueness check adds under a millisecond to a search.
+- Also checked end to end: the floating widget on a WordPress 7.1 site, a
+  quoted search for a heading, the whole phrase marked in the snippet, and a
+  click on the result opening Chrome's viewer at page 48 with the heading
+  highlighted. Ordinary post and page links are byte-identical to 0.9.21's.
+
+### Not changed
+
+- The extractor still cannot decode characters from fonts whose codes need a
+  `ToUnicode` map, which is why the rules above exist. Supporting `ToUnicode`
+  would fix snippets ("visitor s" → "visitor’s"), search, and most of the
+  remaining highlight misses in one go, and is the natural next step for the
+  extractor.
+
 ## [0.9.21] - 03/09/2026
 
 Ten low-severity findings from an external re-test of 0.9.20, six new and four
 carried. No change to indexing, ranking, the visitor path or the schema, so
 **no reindex is required**.
+
+### Changed
+
+- **A multi-result answer now opens at its first result.** The widget scrolled
+  to the bottom of the log after every reply, which is right for a short one
+  and wrong for a tall one: an answer carrying three results with thumbnails is
+  taller than the panel, so the visitor landed on the *last* result with the
+  first — and the framing message above it — scrolled off the top. Where a
+  reply does not fit, the log now opens at the top of that reply instead, and
+  the visitor reads down through the results in the order they were ranked.
+  Short replies still go to the bottom, as before.
 
 ### Fixed
 

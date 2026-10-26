@@ -852,6 +852,12 @@ class MBR_ISA_PDF_Extractor {
         $i            = 0;
         $array_depth  = 0;
 
+        // Where in $out the most recent string operand began. The ' and "
+        // operators move to the next line *before* showing their string, but
+        // operands precede operators, so by the time either is read its
+        // string is already in $out. The break belongs ahead of it.
+        $last_string_at = 0;
+
         while ( $i < $len ) {
             $c = $content[ $i ];
 
@@ -876,6 +882,7 @@ class MBR_ISA_PDF_Extractor {
             // Literal string ( ... ).
             if ( '(' === $c ) {
                 list( $str, $i ) = $this->read_literal_string( $content, $i, $len );
+                $last_string_at  = strlen( $out );
                 $out            .= $str;
                 continue;
             }
@@ -883,6 +890,7 @@ class MBR_ISA_PDF_Extractor {
             // Hex string < ... >.
             if ( '<' === $c ) {
                 list( $str, $i ) = $this->read_hex_string( $content, $i, $len );
+                $last_string_at  = strlen( $out );
                 $out            .= $str;
                 continue;
             }
@@ -975,12 +983,40 @@ class MBR_ISA_PDF_Extractor {
                         // wrong.
                         $out .= ' ';
                         break;
+                    /*
+                     * T* is read as one token.
+                     *
+                     * The bareword loop above accepts '*' as a continuation
+                     * character, so the next-line operator arrives here as
+                     * "T*" — never as 'T' followed by a lone '*', which is
+                     * what this switch used to expect. It therefore matched
+                     * nothing and added no break at all, and every line a
+                     * producer ended with T* was glued to the next one.
+                     * ReportLab ends every wrapped line of a paragraph that
+                     * way, so the plugin's own user guide was indexed with
+                     * "commonquestions" and "chatwidget" in it: neither half
+                     * of either word could be found, and a highlight link
+                     * built from that text could never match the page.
+                     *
+                     * The 'T' and lone '*' branches are kept, since they are
+                     * harmless and a malformed stream can still produce them.
+                     *
+                     * @since 0.9.22
+                     */
+                    case 'T*':
                     case 'Td':
                     case 'TD':
-                    case 'T':  // T* arrives as 'T' then '*' below; handle both.
+                    case 'T':
+                        $out .= "\n";
+                        break;
                     case "'":
                     case '"':
-                        $out .= "\n";
+                        // Next line, then show: the break goes before the
+                        // string these carry, and after it too, so whatever
+                        // follows starts clear. Appending it only afterwards
+                        // glued this line to the one before.
+                        $out = substr( $out, 0, $last_string_at ) . "\n"
+                            . substr( $out, $last_string_at ) . "\n";
                         break;
                     case 'ET':
                         $out .= "\n";

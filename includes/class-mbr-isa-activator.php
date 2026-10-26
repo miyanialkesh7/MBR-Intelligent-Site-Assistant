@@ -139,6 +139,63 @@ class MBR_ISA_Activator {
     }
 
     /**
+     * Settings migration for 0.9.22.
+     *
+     * Two things. The new highlight setting is written explicitly, as 0.8.2
+     * and 0.9.9 wrote theirs, so it is a stored choice rather than a default
+     * nobody made.
+     *
+     * And sites with PDFs in the index are asked to rebuild it. The extractor
+     * fix in this release — T* line breaks were dropped, gluing the last word
+     * of every wrapped line to the first word of the next — changes what is
+     * written for a PDF, and nothing already stored improves until it is
+     * written again. Unlike the 0.8.x notices nothing is exposed meanwhile:
+     * the old rows are merely worse at being found, and highlight links built
+     * from glued words fail safe, opening at the right page without a
+     * highlight. So this asks rather than purges.
+     *
+     * A site with no PDF rows has nothing to rebuild and sees nothing.
+     *
+     * @since 0.9.22
+     *
+     * @param string $from_version Previously installed plugin version.
+     * @return void
+     */
+    public static function migrate_to_0922( $from_version ) {
+        global $wpdb;
+
+        $settings = get_option( 'mbr_isa_settings', [] );
+        if ( ! is_array( $settings ) ) {
+            $settings = [];
+        }
+
+        if ( ! array_key_exists( 'pdf_link_highlight', $settings ) ) {
+            $settings['pdf_link_highlight'] = true;
+            update_option( 'mbr_isa_settings', $settings );
+        }
+
+        if ( empty( $settings['index_pdfs'] ) ) {
+            return;
+        }
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- one-off migration check; table name is the plugin's own.
+        $pdf_rows = (int) $wpdb->get_var(
+            "SELECT COUNT(*) FROM {$wpdb->prefix}mbrisa_documents WHERE doc_kind = 'pdf'"
+        );
+
+        if ( $pdf_rows < 1 ) {
+            return;
+        }
+
+        $status = get_option( 'mbr_isa_index_status', [] );
+        if ( is_array( $status ) ) {
+            $status['reindex_required'] = '0.9.22';
+            update_option( 'mbr_isa_index_status', $status );
+        }
+        set_transient( 'mbr_isa_notice_0922', 1, MONTH_IN_SECONDS );
+    }
+
+    /**
      * Queue a background walk of the index, starting from the first row.
      *
      * Cron rather than this admin page load: the pass walks the whole
@@ -527,6 +584,7 @@ class MBR_ISA_Activator {
             'contents_prefer_body'         => true, // A contents page never stands in for the chapter it lists.
             'pdf_link_position'            => true, // Scroll PDF links to the passage, not just the page.
             'pdf_link_zoom'                => 100,  // Zoom % used by a positioned PDF link.
+            'pdf_link_highlight'           => true, // Highlight the found words in Chrome's PDF viewer.
             'intent_supplementary_results' => true, // Show search hits beneath an intent answer.
             'intent_supplementary_max'     => 3,    // How many, at most.
         ];
